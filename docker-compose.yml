@@ -1,0 +1,207 @@
+name: mongo-local
+
+x-mongo: &mongo
+  image: mongo:${MONGO_VERSION:-8.0}
+  restart: unless-stopped
+  environment:
+    GLIBC_TUNABLES: "glibc.pthread.rseq=1"
+x-init: &init
+  image: mongo:${MONGO_VERSION:-8.0}
+  restart: "no"
+
+services:
+  # ============================================================
+  # Profile: single  (단일 노드)
+  # ============================================================
+  mongo-single:
+    <<: *mongo
+    profiles: [single]
+    container_name: mongo-single
+    hostname: mongo-single
+    command: ["mongod", "--config", "/etc/mongo/mongod.conf"]
+    ports: ["27017:27017"]
+    volumes:
+      - ./config/single/mongod.conf:/etc/mongo/mongod.conf:ro
+      - single-data:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  # ============================================================
+  # Profile: rs  (3노드 Replica Set: rs0)
+  # ============================================================
+  mongo-rs1:
+    <<: *mongo
+    profiles: [rs]
+    container_name: mongo-rs1
+    hostname: mongo-rs1
+    command: ["mongod", "--config", "/etc/mongo/mongod.conf", "--port", "27021"]
+    ports: ["27021:27021"]
+    volumes:
+      - ./config/replicaset/mongod.conf:/etc/mongo/mongod.conf:ro
+      - rs1-data:/data/db
+    healthcheck: &rs-health
+      test: ["CMD", "mongosh", "--port", "27021", "--quiet", "--eval", "db.adminCommand('ping').ok"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  mongo-rs2:
+    <<: *mongo
+    profiles: [rs]
+    container_name: mongo-rs2
+    hostname: mongo-rs2
+    command: ["mongod", "--config", "/etc/mongo/mongod.conf", "--port", "27022"]
+    ports: ["27022:27022"]
+    volumes:
+      - ./config/replicaset/mongod.conf:/etc/mongo/mongod.conf:ro
+      - rs2-data:/data/db
+    healthcheck:
+      <<: *rs-health
+      test: ["CMD", "mongosh", "--port", "27022", "--quiet", "--eval", "db.adminCommand('ping').ok"]
+
+  mongo-rs3:
+    <<: *mongo
+    profiles: [rs]
+    container_name: mongo-rs3
+    hostname: mongo-rs3
+    command: ["mongod", "--config", "/etc/mongo/mongod.conf", "--port", "27023"]
+    ports: ["27023:27023"]
+    volumes:
+      - ./config/replicaset/mongod.conf:/etc/mongo/mongod.conf:ro
+      - rs3-data:/data/db
+    healthcheck:
+      <<: *rs-health
+      test: ["CMD", "mongosh", "--port", "27023", "--quiet", "--eval", "db.adminCommand('ping').ok"]
+
+  mongo-rs-init:
+    <<: *init
+    profiles: [rs]
+    container_name: mongo-rs-init
+    depends_on:
+      mongo-rs1: { condition: service_healthy }
+      mongo-rs2: { condition: service_healthy }
+      mongo-rs3: { condition: service_healthy }
+    volumes:
+      - ./scripts/init-replicaset.js:/scripts/init-replicaset.js:ro
+    entrypoint: ["mongosh", "--host", "mongo-rs1", "--port", "27021", "--file", "/scripts/init-replicaset.js"]
+
+  # ============================================================
+  # Profile: sharded  (config RS + 3 shards + mongos)
+  # ============================================================
+  mongo-cfg1:
+    <<: *mongo
+    profiles: [sharded]
+    container_name: mongo-cfg1
+    hostname: mongo-cfg1
+    command: ["mongod", "--config", "/etc/mongo/mongod.conf"]
+    volumes:
+      - ./config/sharded/configsvr.conf:/etc/mongo/mongod.conf:ro
+      - cfg1-data:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--port", "27019", "--quiet", "--eval", "db.adminCommand('ping').ok"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  mongo-shard1:
+    <<: *mongo
+    profiles: [sharded]
+    container_name: mongo-shard1
+    hostname: mongo-shard1
+    command: ["mongod", "--config", "/etc/mongo/mongod.conf", "--replSet", "shard1"]
+    ports: ["27041:27018"]   # 디버깅용 직접 접속 (directConnection=true)
+    volumes:
+      - ./config/sharded/shard.conf:/etc/mongo/mongod.conf:ro
+      - shard1-data:/data/db
+    healthcheck: &shard-health
+      test: ["CMD", "mongosh", "--port", "27018", "--quiet", "--eval", "db.adminCommand('ping').ok"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  mongo-shard2:
+    <<: *mongo
+    profiles: [sharded]
+    container_name: mongo-shard2
+    hostname: mongo-shard2
+    command: ["mongod", "--config", "/etc/mongo/mongod.conf", "--replSet", "shard2"]
+    ports: ["27042:27018"]
+    volumes:
+      - ./config/sharded/shard.conf:/etc/mongo/mongod.conf:ro
+      - shard2-data:/data/db
+    healthcheck: *shard-health
+
+  mongo-shard3:
+    <<: *mongo
+    profiles: [sharded]
+    container_name: mongo-shard3
+    hostname: mongo-shard3
+    command: ["mongod", "--config", "/etc/mongo/mongod.conf", "--replSet", "shard3"]
+    ports: ["27043:27018"]
+    volumes:
+      - ./config/sharded/shard.conf:/etc/mongo/mongod.conf:ro
+      - shard3-data:/data/db
+    healthcheck: *shard-health
+
+  mongo-mongos:
+    <<: *mongo
+    profiles: [sharded]
+    container_name: mongo-mongos
+    hostname: mongo-mongos
+    command: ["mongos", "--config", "/etc/mongo/mongos.conf"]
+    ports: ["27030:27017"]
+    depends_on:
+      mongo-cfg1: { condition: service_healthy }
+    volumes:
+      - ./config/sharded/mongos.conf:/etc/mongo/mongos.conf:ro
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+  mongo-sharded-init:
+    <<: *init
+    profiles: [sharded]
+    container_name: mongo-sharded-init
+    depends_on:
+      mongo-cfg1:   { condition: service_healthy }
+      mongo-shard1: { condition: service_healthy }
+      mongo-shard2: { condition: service_healthy }
+      mongo-shard3: { condition: service_healthy }
+      mongo-mongos: { condition: service_started }
+    volumes:
+      - ./scripts/init-sharded.sh:/scripts/init-sharded.sh:ro
+    entrypoint: ["bash", "/scripts/init-sharded.sh"]
+
+  # ============================================================
+  # Profile: atlas  (Atlas Local: 단일 노드 RS + mongot, Search/Vector Search 개발용)
+  # ============================================================
+  mongo-atlas:
+    image: mongodb/mongodb-atlas-local:${ATLAS_LOCAL_VERSION:-latest}
+    profiles: [atlas]
+    container_name: mongo-atlas
+    hostname: mongo-atlas          # 단일 노드 replica set이 이 이름으로 구성됨 (필수)
+    restart: unless-stopped
+    ports: ["27027:27017"]         # single(27017)과 동시에 띄울 수 있게 호스트 포트 분리
+    volumes:
+      - atlas-data:/data/db
+      - atlas-config:/data/configdb
+      - atlas-mongot:/data/mongot  # Search / Vector Search 인덱스
+    # healthcheck는 이미지에 내장되어 있음 (docker compose up --wait 로 대기 가능)
+
+volumes:
+  single-data:
+  rs1-data:
+  rs2-data:
+  rs3-data:
+  cfg1-data:
+  shard1-data:
+  shard2-data:
+  shard3-data:
+  atlas-data:
+  atlas-config:
+  atlas-mongot:
